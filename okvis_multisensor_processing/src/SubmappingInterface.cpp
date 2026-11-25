@@ -10,6 +10,7 @@
  * SPDX-License-Identifier: BSD-3-Clause, see LICENESE file for details
  */
 
+#include <thread>
 #include <okvis/SubmappingInterface.hpp>
 #include <okvis/DepthUtils.hpp>
 #include <filesystem>
@@ -424,8 +425,8 @@ namespace okvis {
       // add to Trajectory if possible
       bool success = false;
       State state;
-      if(!trajectoryLocked_) {
-        trajectoryLocked_ = true;
+      bool trajectoryUnlocked = false; // atomic test-and-set (was check then set: not exclusive)
+      if(trajectoryLocked_.compare_exchange_strong(trajectoryUnlocked, true)) {
         for(auto & imuMeasurement : imuMeasurements_) {
           State propagatedState;
           if(propagatedStates.addImuMeasurement(imuMeasurement.timeStamp,
@@ -585,8 +586,9 @@ namespace okvis {
       if(useGtPoses_ && gtPoses_.find(finalTimestamp.toNSec()) != gtPoses_.end()){
           measurementState.T_WS = gtPoses_[finalTimestamp.toNSec()];
       }else{
-        while(trajectoryLocked_);
-        trajectoryLocked_ = true;
+        for(bool unlocked = false; !trajectoryLocked_.compare_exchange_weak(unlocked, true); unlocked = false) {
+          std::this_thread::yield(); // atomic test-and-set (was check then set: not exclusive)
+        }
         if(!propagatedStates.getState(finalTimestamp, measurementState)){
           trajectoryLocked_ = false;
           return false;
@@ -1176,8 +1178,9 @@ namespace okvis {
 
           // propagatedStates.update(popState.trackingState, popState.updatedStates, popState.affectedStates);
           // update Trajectory object
-          while(trajectoryLocked_);
-          trajectoryLocked_ = true;
+          for(bool unlocked = false; !trajectoryLocked_.compare_exchange_weak(unlocked, true); unlocked = false) {
+            std::this_thread::yield(); // atomic test-and-set (was check then set: not exclusive)
+          }
           propagatedStates.update(popState.trackingState, popState.updatedStates, popState.affectedStates);
           trajectoryLocked_ = false;
 
@@ -1212,8 +1215,9 @@ namespace okvis {
         // Update internal representation of the trajectory
         // propagatedStates.update(currentStateUpdate.trackingState, currentStateUpdate.updatedStates, currentStateUpdate.affectedStates);
         // update Trajectory object
-        while(trajectoryLocked_);
-        trajectoryLocked_ = true;
+        for(bool unlocked = false; !trajectoryLocked_.compare_exchange_weak(unlocked, true); unlocked = false) {
+          std::this_thread::yield(); // atomic test-and-set (was check then set: not exclusive)
+        }
         propagatedStates.update(currentStateUpdate.trackingState, currentStateUpdate.updatedStates, currentStateUpdate.affectedStates);
         trajectoryLocked_ = false;
         

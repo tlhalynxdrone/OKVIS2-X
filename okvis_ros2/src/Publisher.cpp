@@ -24,6 +24,8 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <pcl_conversions/pcl_conversions.h>
+#include <atomic>
+#include <thread>
 
 #include <okvis/FrameTypedefs.hpp>
 
@@ -125,8 +127,10 @@ bool Publisher::realtimePredictAndPublish(const okvis::Time& stamp,
   // add to Trajectory if possible
   bool success = false;
   State state;
-  if(!trajectoryLocked_) {
-    trajectoryLocked_ = true;
+  // atomic test-and-set: a separate check then set let this (ROS) thread and the estimator thread
+  // (publishEstimatorUpdate) both modify trajectory_ at the same time -> heap corruption
+  bool unlocked = false;
+  if(trajectoryLocked_.compare_exchange_strong(unlocked, true, std::memory_order_acquire)) {
     for(auto & imuMeasurement : imuMeasurements_) {
       State propagatedState;
       if(trajectory_.addImuMeasurement(imuMeasurement.timeStamp,
@@ -138,7 +142,7 @@ bool Publisher::realtimePredictAndPublish(const okvis::Time& stamp,
       }
     }
     imuMeasurements_.clear();
-    trajectoryLocked_ = false;
+    trajectoryLocked_.store(false, std::memory_order_release);
     if(!success) {
       return false;
     }
@@ -256,7 +260,9 @@ void Publisher::publishEstimatorUpdate(
 
   // publish mesh
   if(!meshMsg_->mesh_resource.empty())
-    pubMesh_.publish(meshMsg_);  //publish stamped mesh
+    // copy: meshMsg_ (member) is re-stamped at every update while the publisher thread may still
+    // serialise the previous one
+    pubMesh_.publish(std::make_shared<visualization_msgs::msg::Marker>(*meshMsg_));  //publish stamped mesh
 
   // check if empty
   if(updatedStates->empty()) {
@@ -285,12 +291,22 @@ void Publisher::publishEstimatorUpdate(
     pubTransform_.publish(updatedStatePoseMsg);
   }
 
-  // update Trajectory object
+  // update Trajectory object. Locked (atomic test-and-set, see realtimePredictAndPublish) until the
+  // path below is built: its trajectory_.getState calls must not run while the ROS thread adds IMU
+  // measurements to trajectory_ (Trajectory has no locking of its own). Unlocked at the end of the
+  // block, before the landmarks.
+  {
   std::set<okvis::StateId> affectedStateIds;
-  while(trajectoryLocked_);
-  trajectoryLocked_ = true;
+  for(bool unlocked = false;
+      !trajectoryLocked_.compare_exchange_weak(unlocked, true, std::memory_order_acquire);
+      unlocked = false) {
+    std::this_thread::yield();
+  }
+  struct Unlock {
+    std::atomic_bool& flag;
+    ~Unlock() { flag.store(false, std::memory_order_release); }
+  } unlockTrajectory{trajectoryLocked_};
   trajectory_.update(trackingState, updatedStates, affectedStateIds);
-  trajectoryLocked_ = false;
 
   // now for the path (in segments of 1000 state IDs)
   auto path = std::make_shared<visualization_msgs::msg::Marker>(); // The path message.
@@ -313,7 +329,9 @@ void Publisher::publishEstimatorUpdate(
   path->scale.x = 0.015;
   path->lifetime = rclcpp::Duration::from_seconds(0); // 0 for infinity
 
-  // publish paths as batches of 1000 points.
+  // publish paths as batches of 1000 points (nothing to draw without affected / updated states:
+  // begin() / rbegin() of an empty container below)
+  if(!affectedStateIds.empty() && updatedStates && !updatedStates->empty()) {
   uint64_t firstId = affectedStateIds.begin()->value();
   uint64_t id = (firstId/1000)*1000;
   if(id==0) {
@@ -337,15 +355,21 @@ void Publisher::publishEstimatorUpdate(
   while(id <= latestId) {
     uint64_t roundedId = (id/1000)*1000;
     if(path->id != int64_t(roundedId)) {
-      pubPath_.publish(path); // first publish finished segment
+      // copy: path is modified right below while the publisher thread may serialise it (double free)
+      pubPath_.publish(std::make_shared<visualization_msgs::msg::Marker>(*path)); // finished segment
       path->id = roundedId;
       // ..object ID useful in conjunction with namespace for manipulating&deleting the object later
-      geometry_msgs::msg::Point lastPoint =  path->points.back(); // save last point
-      path->points.clear(); // start new segment
-      path->points.push_back(lastPoint);
+      if(!path->points.empty()) {
+        geometry_msgs::msg::Point lastPoint =  path->points.back(); // save last point
+        path->points.clear(); // start new segment
+        path->points.push_back(lastPoint);
+      }
     }
     okvis::State state;
-    if(!trajectory_.getState(okvis::StateId(id), state)) continue;
+    if(!trajectory_.getState(okvis::StateId(id), state)) {
+      ++id; // was "continue" without ++id: endless loop on a missing state
+      continue;
+    }
     const okvis::kinematics::Transformation T_WB_p = state.T_WS * T_SB;
     const Eigen::Vector3d& r = T_WB_p.r();
     geometry_msgs::msg::Point point;
@@ -355,7 +379,9 @@ void Publisher::publishEstimatorUpdate(
     path->points.push_back(point);
     ++id;
   }
-  pubPath_.publish(path); // publish last segment
+  pubPath_.publish(std::make_shared<visualization_msgs::msg::Marker>(*path)); // last segment (copy)
+  }
+  } // trajectory_ unlocked
 
   // finally the landmarks
   pcl::PointCloud<pcl::PointXYZRGB> pointsMatched; // Point cloud for matched points.
@@ -610,7 +636,7 @@ void Publisher::publishSubmapsAsCallback(std::unordered_map<uint64_t, okvis::kin
 
       if(submap_publisher_buffer == 30){
         submap_publisher_buffer = 0;
-        pubSubmapMesh_.publish(markerarraymsg_);
+        pubSubmapMesh_.publish(std::make_shared<visualization_msgs::msg::MarkerArray>(*markerarraymsg_)); // copy: member, modified later
         markerarraymsg_->markers.clear();
       }
     }
@@ -623,14 +649,14 @@ void Publisher::publishSubmapsAsCallback(std::unordered_map<uint64_t, okvis::kin
 
       if(submap_publisher_buffer == 30){
         submap_publisher_buffer = 0;
-        pubSubmapMesh_.publish(markerarraymsg_);
+        pubSubmapMesh_.publish(std::make_shared<visualization_msgs::msg::MarkerArray>(*markerarraymsg_)); // copy: member, modified later
         markerarraymsg_->markers.clear();
       }
     }
   }
   
   if(markerarraymsg_->markers.size() > 0) {
-      pubSubmapMesh_.publish(markerarraymsg_);
+      pubSubmapMesh_.publish(std::make_shared<visualization_msgs::msg::MarkerArray>(*markerarraymsg_)); // copy: member, modified later
   }
   
   return;
@@ -966,7 +992,7 @@ void Publisher::republishMeshes()
 
       if(submap_publisher_buffer == 30){
         submap_publisher_buffer = 0;
-        pubSubmapMesh_.publish(markerarraymsg_);
+        pubSubmapMesh_.publish(std::make_shared<visualization_msgs::msg::MarkerArray>(*markerarraymsg_)); // copy: member, modified later
         markerarraymsg_->markers.clear();
       }
     }
@@ -979,14 +1005,14 @@ void Publisher::republishMeshes()
 
       if(submap_publisher_buffer == 30){
         submap_publisher_buffer = 0;
-        pubSubmapMesh_.publish(markerarraymsg_);
+        pubSubmapMesh_.publish(std::make_shared<visualization_msgs::msg::MarkerArray>(*markerarraymsg_)); // copy: member, modified later
         markerarraymsg_->markers.clear();
       }
     }
   }
   
   if(markerarraymsg_->markers.size() > 0) {
-      pubSubmapMesh_.publish(markerarraymsg_);
+      pubSubmapMesh_.publish(std::make_shared<visualization_msgs::msg::MarkerArray>(*markerarraymsg_)); // copy: member, modified later
   }
 
   return;
