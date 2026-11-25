@@ -6,3 +6,6 @@
 *.asv
 /documentation
 *.pt
+external/ceres-solver
+external/DBoW2
+external/opengv
