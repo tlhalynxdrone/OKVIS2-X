@@ -174,17 +174,15 @@ void DepthFusionProcessor::processingStereo() {
   while(!isFinished()) {
     // StereoMeasurement sframe;
     std::map<size_t, std::vector<okvis::CameraMeasurement>> sframe;
-    if (!cameraMeasurementsQueue_.Empty()) {
-      if(blocking_){
-        if (cameraMeasurementsQueue_.PopBlocking(&sframe)) {
-          processStereoNetwork(sframe);
-        }
+    if(blocking_){
+      if (!cameraMeasurementsQueue_.Empty() && cameraMeasurementsQueue_.PopBlocking(&sframe)) {
+        processStereoNetwork(sframe);
       }
-      else{
-        if (cameraMeasurementsQueue_.PopNonBlocking(&sframe)) {
-          processStereoNetwork(sframe);
-        }
-      }
+    }
+    // wait for a frame (woken by the push) instead of spinning a core on Empty / PopNonBlocking;
+    // the timeout bounds the isFinished() check
+    else if (cameraMeasurementsQueue_.PopTimeout(&sframe, 20000000)) {
+      processStereoNetwork(sframe);
     }
   }
 }
@@ -196,9 +194,13 @@ void DepthFusionProcessor::processingMotion() {
     okvis::State latestTrajState;
     StereoPrediction oldestPrediction;
 
-    while (!statesQueue_.Empty()) {
-      statesQueue_.PopBlocking(&states);
+    // wait for new states (woken by the push, the MVS step needs them) instead of spinning a core;
+    // the timeout bounds the isFinished() check and the polling of a waiting prediction
+    if (statesQueue_.PopTimeout(&states, 5000000)) {
       updateTrajectory(states);
+      while (statesQueue_.PopNonBlocking(&states)) {
+        updateTrajectory(states);
+      }
     }
 
     if (!stereoPredictionQueue_.Empty()) {

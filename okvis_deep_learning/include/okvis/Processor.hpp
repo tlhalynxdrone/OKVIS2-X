@@ -145,6 +145,10 @@ private:
   DeepLearningProcessor* const deepLearningProcessor_;
 
   okvis::ViInterface::OptimisedGraphCallback optimizedGraphCallback_;
+
+  /// output_parameters.enable_submapping: without it no submap is ever created, so finish()
+  /// must not wait for SubmappingInterface::finishedIntegrating() (never true: endless loop)
+  bool enableSubmapping_ = false;
 };
 
 }

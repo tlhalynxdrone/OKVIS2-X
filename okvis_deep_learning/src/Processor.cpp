@@ -10,6 +10,9 @@
  * SPDX-License-Identifier: BSD-3-Clause, see LICENESE file for details
  */
 
+#include <chrono>
+#include <thread>
+
 #include <okvis/Processor.hpp>
 #include <okvis/DepthFusionProcessor.hpp>
 
@@ -25,6 +28,8 @@ Processor::Processor(okvis::ViParameters& parameters,
   deepLearningProcessor_(dlProcessor),
   slam_(parameters, dBowDir, submapConfig),
   se_interface_(mapConfig, dataConfig, submapConfig, parameters) {
+
+  enableSubmapping_ = parameters.output.enable_submapping;
 
   // Connect the SLAM optimized graph callback to supereight.
   slam_.setOptimisedGraphCallback(std::bind(
@@ -85,7 +90,14 @@ void Processor::collectInfo() {
 
 void Processor::finish() {
   slam_.stopThreading();
-  while(!se_interface_.finishedIntegrating());
+  // finishedIntegrating() needs at least one submap: only wait for it with submapping enabled
+  // (as okvis2x_node does), else Ctrl-C never ends the network nodes (endless wait)
+  if(enableSubmapping_) {
+    while(!se_interface_.finishedIntegrating()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+  // always: stops the supereight threads joined by ~SubmappingInterface (meshes only an existing submap)
   se_interface_.setFinished();
 }
 

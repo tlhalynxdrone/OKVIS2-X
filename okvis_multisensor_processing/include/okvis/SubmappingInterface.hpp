@@ -471,7 +471,13 @@ namespace okvis {
         void setFinished(){
             std::lock_guard<std::mutex> l(finishMutex_);
             isFinished_ = true;
-            seMeshLookup_[prevKeyframeId_] = seSubmapLookup_[prevKeyframeId_].map->mesh();
+            // no submap (enable_submapping: false, or stopped before the first one): nothing to
+            // mesh; operator[] would insert an empty entry and mesh() a null map (segfault)
+            const auto submap = seSubmapLookup_.find(prevKeyframeId_);
+            if(submap == seSubmapLookup_.end() || !submap->second.map) {
+              return;
+            }
+            seMeshLookup_[prevKeyframeId_] = submap->second.map->mesh();
             // Finish Objects for completed submap, means coloring of mesh for text query and extracting poses
             objectMap_->finishSubmapObjects(prevKeyframeId_);
             return;

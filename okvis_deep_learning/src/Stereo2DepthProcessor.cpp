@@ -229,7 +229,9 @@ void Stereo2DepthProcessor::processing() {
       }
     }
     else{
-      while(cameraMeasurementsQueue_.PopNonBlocking(&frame)) {
+      // wait for a frame (woken by the push) instead of spinning a core on PopNonBlocking;
+      // the timeout bounds the shutdown_ check
+      if(cameraMeasurementsQueue_.PopTimeout(&frame, 20000000)) {
         processStereoNetwork(frame);
       }
     }

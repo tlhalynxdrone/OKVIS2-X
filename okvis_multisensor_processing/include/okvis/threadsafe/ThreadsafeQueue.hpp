@@ -216,8 +216,10 @@ class Queue {
       struct timeval tv;
       struct timespec ts;
       gettimeofday(&tv, nullptr);
-      ts.tv_sec = tv.tv_sec;
-      ts.tv_nsec = tv.tv_usec * 1e3 + timeout_nanoseconds;
+      // normalised: tv_nsec >= 1e9 makes pthread_cond_timedwait fail at once (EINVAL)
+      const int64_t nsec = int64_t(tv.tv_usec) * 1000 + timeout_nanoseconds;
+      ts.tv_sec = tv.tv_sec + nsec / 1000000000;
+      ts.tv_nsec = nsec % 1000000000;
       pthread_cond_timedwait(&condition_empty_, &mutex_, &ts);
     }
     if (queue_.empty()) {
