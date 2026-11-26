@@ -151,11 +151,13 @@ void Subscriber::imuCallback(const sensor_msgs::msg::Imu& msg)
   // forward to estimator
   viInterface_->addImuMeasurement(timestamp, acc, gyr);
   
-   // also forward for realtime prediction
+   // also forward for realtime prediction: to the map (submapping / network nodes) AND to the
+  // publisher. With "else if" the network nodes (always given a seInterface) never published the
+  // IMU-propagated odometry (/okvis/okvis_odometry, okvis_transform).
   if(seInterface_) {
     seInterface_->realtimePredict(timestamp, acc, gyr);
   }
-  else if(publisher_) {
+  if(publisher_) {
     publisher_->realtimePredictAndPublish(timestamp, acc, gyr);
   }
 }
