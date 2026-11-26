@@ -9,3 +9,6 @@
 external/ceres-solver
 external/DBoW2
 external/opengv
+message
+registerPublisher
+success
